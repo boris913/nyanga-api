@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import type { FastifyRequest } from 'fastify';
+import { clientIp } from '../src/lib/client-ip.js';
 import { normalizeCameroonPhone } from '../src/lib/phone.js';
 import { hashPassword, verifyPassword } from '../src/lib/password.js';
 import { ageFromBirthDate, moderateText } from '../src/lib/moderation.js';
@@ -66,5 +68,16 @@ describe('session', () => {
     const token = await signSession(secret, 'user1', 0);
     expect(await verifySession('x'.repeat(32), token)).toBeNull();
     expect(await verifySession(secret, token.slice(0, -2) + 'aa')).toBeNull();
+  });
+});
+
+describe('clientIp', () => {
+  const req = (headers: Record<string, string>) => ({ headers, ip: '98.84.176.5' }) as unknown as FastifyRequest;
+  it('prend l’adresse transmise par le proxy avec le bon secret', () =>
+    expect(clientIp(req({ 'x-nyanga-client-ip': '102.244.1.7', 'x-nyanga-proxy-secret': 'secret' }), 'secret')).toBe('102.244.1.7'));
+  it('ignore l’adresse sans secret valide ou sans secret configuré', () => {
+    expect(clientIp(req({ 'x-nyanga-client-ip': '1.2.3.4', 'x-nyanga-proxy-secret': 'faux' }), 'secret')).toBe('98.84.176.5');
+    expect(clientIp(req({ 'x-nyanga-client-ip': '1.2.3.4' }), 'secret')).toBe('98.84.176.5');
+    expect(clientIp(req({ 'x-nyanga-client-ip': '1.2.3.4', 'x-nyanga-proxy-secret': '' }), '')).toBe('98.84.176.5');
   });
 });

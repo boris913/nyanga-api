@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { badRequest } from '../lib/errors.js';
 import { normalizeCameroonPhone } from '../lib/phone.js';
+import { clientIp } from '../lib/client-ip.js';
 
 const checkoutSchema = z.object({
   sku: z.enum(['PREMIUM', 'VIP', 'BUMP', 'FEATURED_24H', 'FEATURED_7D']),
@@ -36,8 +37,7 @@ export const billingRoutes: FastifyPluginAsync = async (app) => {
     if (!phone) throw badRequest('Numéro camerounais invalide');
     if (phone !== user.phone) await prisma.user.update({ where: { id: user.id }, data: { phone } });
 
-    const forwarded = req.headers['x-forwarded-for'];
-    const customerIp = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim() || req.ip;
+    const customerIp = clientIp(req, env.PROXY_SECRET);
     const result = await app.chariow.checkout({
       productId: item.productId,
       // L'email du compte rattache ensuite les Pulses license.* à cet utilisateur.

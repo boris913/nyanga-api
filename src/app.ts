@@ -9,6 +9,7 @@ import { ZodError } from 'zod';
 import type { Env } from './env.js';
 import { HttpError, forbidden, unauthorized } from './lib/errors.js';
 import { SESSION_COOKIE, verifySession } from './lib/session.js';
+import { clientIp } from './lib/client-ip.js';
 import { createMailer, type Mailer } from './lib/mail.js';
 import { createGoogleVerifier, type GoogleVerifier } from './lib/google.js';
 import { createStorage, type Storage } from './lib/storage.js';
@@ -89,7 +90,7 @@ export async function buildApp(env: Env, overrides: AppOverrides = {}) {
   await app.register(helmet);
   await app.register(cookie);
   await app.register(cors, { origin: [env.WEB_URL], credentials: true });
-  await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
+  await app.register(rateLimit, { max: 120, timeWindow: '1 minute', keyGenerator: (req) => clientIp(req, env.PROXY_SECRET) });
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof HttpError) {
