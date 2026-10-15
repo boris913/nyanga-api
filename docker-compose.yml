@@ -1,0 +1,31 @@
+# Développement local : PostgreSQL + API.
+# Lancer la base seule : docker compose up -d db
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nyanga
+      POSTGRES_PASSWORD: nyanga
+      POSTGRES_DB: nyanga
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nyanga"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://nyanga:nyanga@db:5432/nyanga
+    ports:
+      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

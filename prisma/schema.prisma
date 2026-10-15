@@ -1,0 +1,219 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+enum Gender {
+  FEMME
+  HOMME
+}
+
+enum Intent {
+  AMITIE
+  RELATION
+  MARIAGE
+  SORTIES
+}
+
+enum ListingStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  HIDDEN
+}
+
+enum VerificationStatus {
+  NONE
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum Plan {
+  STANDARD
+  PREMIUM
+  VIP
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
+model City {
+  id       String    @id @default(cuid())
+  slug     String    @unique
+  name     String
+  region   String
+  users    User[]
+  listings Listing[]
+}
+
+model User {
+  id                 String             @id @default(cuid())
+  email              String             @unique
+  emailVerifiedAt    DateTime?
+  passwordHash       String?
+  googleId           String?            @unique
+  phone              String?
+  displayName        String?
+  birthDate          DateTime?
+  gender             Gender?
+  seeking            Gender?
+  cityId             String?
+  city               City?              @relation(fields: [cityId], references: [id])
+  role               Role               @default(USER)
+  verification       VerificationStatus @default(NONE)
+  selfieKey          String?
+  bannedAt           DateTime?
+  tokenVersion       Int                @default(0)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  listing            Listing?
+  subscriptions      Subscription[]
+  purchases          Purchase[]
+  sentMessages       Message[]
+  conversationsA     Conversation[]     @relation("ConversationA")
+  conversationsB     Conversation[]     @relation("ConversationB")
+  reports            Report[]
+  resetTokens        PasswordResetToken[]
+}
+
+// Jeton de réinitialisation : seul son hash SHA-256 est stocké.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Listing {
+  id            String        @id @default(cuid())
+  userId        String        @unique
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title         String
+  body          String
+  intent        Intent
+  cityId        String
+  city          City          @relation(fields: [cityId], references: [id])
+  neighborhood  String?
+  status        ListingStatus @default(PENDING)
+  moderationNote String?
+  bumpedAt      DateTime      @default(now())
+  featuredUntil DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  photos        Photo[]
+  reports       Report[]
+  conversations Conversation[]
+
+  @@index([cityId, status, bumpedAt])
+  @@index([cityId, status, featuredUntil])
+}
+
+model Photo {
+  id        String   @id @default(cuid())
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  key       String   @unique
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  listingId String?
+  listing   Listing?  @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  userAId   String
+  userA     User      @relation("ConversationA", fields: [userAId], references: [id], onDelete: Cascade)
+  userBId   String
+  userB     User      @relation("ConversationB", fields: [userBId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@unique([userAId, userBId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  body           String
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([senderId, createdAt])
+}
+
+model Report {
+  id         String    @id @default(cuid())
+  reporterId String
+  reporter   User      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  listingId  String
+  listing    Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  reason     String
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@unique([reporterId, listingId])
+}
+
+// Abonnements alimentés uniquement par les Pulses Chariow (source de vérité).
+model Subscription {
+  id         String             @id @default(cuid())
+  userId     String?
+  user       User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email      String
+  productId  String
+  plan       Plan
+  licenseKey String             @unique
+  status     SubscriptionStatus @default(ACTIVE)
+  expiresAt  DateTime?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  @@index([userId, status])
+  @@index([email, productId])
+}
+
+model Purchase {
+  id        String   @id @default(cuid())
+  saleId    String   @unique
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String
+  productId String
+  listingId String?
+  createdAt DateTime @default(now())
+
+  @@index([email, productId])
+}
+
+// Déduplication des Pulses sur x-pulse-delivery-id.
+model PulseDelivery {
+  id          String    @id
+  event       String
+  payload     Json
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  error       String?
+}
