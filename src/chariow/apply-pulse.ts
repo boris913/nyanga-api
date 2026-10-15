@@ -20,13 +20,21 @@ export async function applyPulse(payload: PulsePayload, { prisma, byProductId, l
       return;
 
     case 'record_purchase': {
-      const user = action.userId ? await prisma.user.findUnique({ where: { id: action.userId } }) : null;
+      // Métadonnées de la vente si Chariow les renvoie, sinon le compte portant l'email de l'acheteur
+      // (le paiement est créé avec l'email du compte).
+      const user =
+        (action.userId ? await prisma.user.findUnique({ where: { id: action.userId } }) : null) ??
+        (await prisma.user.findUnique({ where: { email: action.email! } }));
       const userId = user?.id ?? null;
-      const purchase = await prisma.purchase.upsert({
-        where: { saleId: action.saleId! },
-        update: {},
-        create: { saleId: action.saleId!, userId, email: action.email!, productId: action.productId!, listingId: action.listingId },
-      });
+      const item = byProductId[action.productId!];
+      const listingId =
+        action.listingId ??
+        (item?.kind === 'boost' && userId ? ((await prisma.listing.findUnique({ where: { userId }, select: { id: true } }))?.id ?? null) : null);
+      // Une vente déjà enregistrée (Pulse rejoué) n'applique pas le boost une seconde fois.
+      const existing = await prisma.purchase.findUnique({ where: { saleId: action.saleId! } });
+      const purchase =
+        existing ??
+        (await prisma.purchase.create({ data: { saleId: action.saleId!, userId, email: action.email!, productId: action.productId!, listingId } }));
       if (userId) {
         // Une licence arrivée avant la vente est rattachée maintenant.
         await prisma.subscription.updateMany({
@@ -34,8 +42,7 @@ export async function applyPulse(payload: PulsePayload, { prisma, byProductId, l
           data: { userId },
         });
       }
-      const item = byProductId[action.productId!];
-      if (item?.kind === 'boost' && userId && purchase.listingId) await applyBoost(prisma, userId, purchase.listingId, item);
+      if (!existing && item?.kind === 'boost' && userId && purchase.listingId) await applyBoost(prisma, userId, purchase.listingId, item);
       return;
     }
 
@@ -73,12 +80,14 @@ async function applyBoost(prisma: PrismaClient, userId: string, listingId: strin
   const listing = await prisma.listing.findFirst({ where: { id: listingId, userId } });
   if (!listing) return;
   const now = new Date();
-  const base = listing.featuredUntil && listing.featuredUntil > now ? listing.featuredUntil : now;
+  // Un achat pendant une période active la prolonge au lieu de la remplacer.
+  const extend = (current: Date | null, hours: number) => new Date((current && current > now ? current : now).getTime() + hours * 3600_000);
   await prisma.listing.update({
     where: { id: listing.id },
     data: {
       bumpedAt: now,
-      ...(item.featuredHours ? { featuredUntil: new Date(base.getTime() + item.featuredHours * 3600_000) } : {}),
+      ...(item.featuredHours ? { featuredUntil: extend(listing.featuredUntil, item.featuredHours) } : {}),
+      ...(item.pinnedHours ? { pinnedUntil: extend(listing.pinnedUntil, item.pinnedHours) } : {}),
     },
   });
 }

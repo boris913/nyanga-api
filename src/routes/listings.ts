@@ -54,6 +54,7 @@ function present(app: FastifyInstance, l: ListingWithRelations, plan: Plan = 'ST
     neighborhood: l.neighborhood,
     status: l.status,
     featured: Boolean(l.featuredUntil && l.featuredUntil > new Date()),
+    pinned: Boolean(l.pinnedUntil && l.pinnedUntil > new Date()),
     bumpedAt: l.bumpedAt,
     photos: l.photos.map((p) => ({ id: p.id, url: app.storage.publicUrl(p.key) })),
     author: {
@@ -86,20 +87,27 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
       ...(q.city ? { city: { slug: q.city } } : {}),
       ...(q.intent ? { intent: q.intent } : {}),
     };
-    const [featured, items, total] = await Promise.all([
+    // Remontées payantes en cours : en tête de la première page, hors pagination des autres annonces.
+    const pinnedWhere: Prisma.ListingWhereInput = { AND: [where, { pinnedUntil: { gt: now } }] };
+    const regularWhere: Prisma.ListingWhereInput = { AND: [where, { OR: [{ pinnedUntil: null }, { pinnedUntil: { lte: now } }] }] };
+    const [featured, pinned, regular, pinnedCount, regularCount] = await Promise.all([
       q.page === 1
         ? prisma.listing.findMany({ where: { ...where, featuredUntil: { gt: now } }, include: listingInclude, orderBy: { featuredUntil: 'desc' }, take: 12 })
         : [],
-      prisma.listing.findMany({ where, include: listingInclude, orderBy: { bumpedAt: 'desc' }, skip: (q.page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
-      prisma.listing.count({ where }),
+      q.page === 1 ? prisma.listing.findMany({ where: pinnedWhere, include: listingInclude, orderBy: { bumpedAt: 'desc' }, take: 48 }) : [],
+      prisma.listing.findMany({ where: regularWhere, include: listingInclude, orderBy: { bumpedAt: 'desc' }, skip: (q.page - 1) * PAGE_SIZE, take: PAGE_SIZE }),
+      prisma.listing.count({ where: pinnedWhere }),
+      prisma.listing.count({ where: regularWhere }),
     ]);
+    const items = [...pinned, ...regular];
     const plans = await plansFor(app, [...featured, ...items].map((l) => l.userId));
     return {
       featured: featured.map((l) => present(app, l, plans.get(l.userId))),
       items: items.map((l) => present(app, l, plans.get(l.userId))),
-      total,
+      total: pinnedCount + regularCount,
       page: q.page,
       pageSize: PAGE_SIZE,
+      pages: Math.max(1, Math.ceil(regularCount / PAGE_SIZE)),
     };
   });
 

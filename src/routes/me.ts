@@ -23,7 +23,7 @@ export const meRoutes: FastifyPluginAsync = async (app) => {
     const [{ plan, expiresAt }, city, listing] = await Promise.all([
       effectivePlan(prisma, user.id),
       user.cityId ? prisma.city.findUnique({ where: { id: user.cityId } }) : null,
-      prisma.listing.findUnique({ where: { userId: user.id }, select: { id: true, status: true, moderationNote: true, featuredUntil: true } }),
+      prisma.listing.findUnique({ where: { userId: user.id }, select: { id: true, status: true, moderationNote: true, featuredUntil: true, pinnedUntil: true } }),
     ]);
     const limits = PLAN_LIMITS[plan];
     return {

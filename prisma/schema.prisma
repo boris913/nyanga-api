@@ -117,6 +117,8 @@ model Listing {
   moderationNote String?
   bumpedAt      DateTime      @default(now())
   featuredUntil DateTime?
+  // Remontée payante : garantie en tête des annonces récentes jusqu'à cette date.
+  pinnedUntil   DateTime?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   photos        Photo[]
@@ -125,6 +127,7 @@ model Listing {
 
   @@index([cityId, status, bumpedAt])
   @@index([cityId, status, featuredUntil])
+  @@index([status, pinnedUntil])
 }
 
 model Photo {
