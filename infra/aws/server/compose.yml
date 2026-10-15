@@ -1,4 +1,4 @@
-# Production : PostgreSQL + API sur le serveur EC2. Les variables viennent de .env,
+# Production : PostgreSQL + API + Caddy (HTTPS) sur le serveur EC2. Les variables viennent de .env,
 # généré par deploy.sh depuis les paramètres SSM /nyanga/prod/*.
 x-logging: &logging
   driver: json-file
@@ -33,9 +33,29 @@ services:
       PORT: "4000"
       DATABASE_URL: postgresql://nyanga:${POSTGRES_PASSWORD}@db:5432/nyanga?connection_limit=5
       S3_REGION: eu-west-3
-    ports:
-      - "80:4000"
     depends_on:
       db:
         condition: service_healthy
     logging: *logging
+
+  # HTTPS public : certificat Let's Encrypt automatique pour API_DOMAIN.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      API_DOMAIN: ${API_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:

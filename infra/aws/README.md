@@ -20,7 +20,7 @@ Chaque push sur `main` lance [.github/workflows/deploy.yml](../../.github/workfl
 
 Les migrations Prisma s'appliquent au démarrage de l'API. On peut aussi relancer un déploiement à la main : onglet Actions, puis « Run workflow ».
 
-Variables du dépôt GitHub (pas des secrets) : `AWS_DEPLOY_ROLE_ARN`, `OPS_BUCKET`, `INSTANCE_ID`.
+Variables du dépôt GitHub (pas des secrets) : `AWS_DEPLOY_ROLE_ARN`, `ECR_REPOSITORY_URI`, `OPS_BUCKET`, `INSTANCE_ID` (sorties de la pile).
 
 ## Configuration
 

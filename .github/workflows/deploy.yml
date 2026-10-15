@@ -44,19 +44,19 @@ jobs:
 
       - name: Image Docker
         env:
-          IMAGE: ${{ steps.ecr.outputs.registry }}/nyanga-api:${{ github.sha }}
+          IMAGE: ${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}
         run: |
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
       - name: Déploiement sur le serveur
         env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY_URI }}
           OPS_BUCKET: ${{ vars.OPS_BUCKET }}
           INSTANCE_ID: ${{ vars.INSTANCE_ID }}
         run: |
           aws s3 cp infra/aws/server/ "s3://$OPS_BUCKET/deploy/" --recursive
-          COMMANDS=$(jq -cn --arg c "mkdir -p /opt/nyanga && aws s3 cp s3://$OPS_BUCKET/deploy/ /opt/nyanga/ --recursive --region $AWS_REGION && bash /opt/nyanga/deploy.sh $GITHUB_SHA $REGISTRY $OPS_BUCKET" '{commands: [$c]}')
+          COMMANDS=$(jq -cn --arg c "mkdir -p /opt/nyanga && aws s3 cp s3://$OPS_BUCKET/deploy/ /opt/nyanga/ --recursive --region $AWS_REGION && bash /opt/nyanga/deploy.sh $GITHUB_SHA $REPOSITORY $OPS_BUCKET" '{commands: [$c]}')
           CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
             --comment "nyanga $GITHUB_SHA" --parameters "$COMMANDS" --query Command.CommandId --output text)
           for i in $(seq 1 60); do

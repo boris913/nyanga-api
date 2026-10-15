@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Nyanga MVP (eu-west-3). Un serveur EC2 t3.micro fait tourner l'API et PostgreSQL dans Docker ;
-  CloudFront fournit le HTTPS public, sert /api/* depuis l'EC2 et listings/* depuis le bucket photos (OAC).
-  L'EC2 n'accepte que CloudFront (prefix list + en-tête secret). Déploiement : GitHub Actions (OIDC) pousse
-  l'image dans ECR puis lance deploy.sh via SSM Run Command. Données : volume EBS dédié conservé + sauvegarde
-  quotidienne pg_dump dans le bucket ops.
+  Nyanga MVP (eu-west-3). Un serveur EC2 t3.micro fait tourner Caddy (HTTPS Let's Encrypt sur <ip>.sslip.io),
+  l'API et PostgreSQL dans Docker. Les photos d'annonces (listings/*) sont lisibles publiquement dans S3,
+  les selfies restent privés. Déploiement : GitHub Actions (OIDC) pousse l'image dans ECR puis lance deploy.sh
+  via SSM Run Command. Données : volume EBS dédié conservé + sauvegarde quotidienne pg_dump dans le bucket ops.
+  CloudFront n'est pas utilisé : il exige une vérification du compte par le support AWS.
 
 Metadata:
   AWSToolsMetrics:
@@ -17,14 +17,13 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.micro
+  VpcId:
+    Type: AWS::EC2::VPC::Id
   SubnetId:
     Type: AWS::EC2::Subnet::Id
     Description: Sous-réseau public par défaut ; le volume de données doit être dans la même zone.
   AvailabilityZone:
     Type: AWS::EC2::AvailabilityZone::Name
-  CloudFrontPrefixListId:
-    Type: String
-    Description: Prefix list gérée com.amazonaws.global.cloudfront.origin-facing de la région.
   GitHubRepository:
     Type: String
     Default: boris913/nyanga-api
@@ -40,14 +39,15 @@ Resources:
     UpdateReplacePolicy: Retain
     Metadata:
       com.aws.cloudformation.Context:
-        why: Photos des annonces (listings/*, servies par CloudFront) et selfies de vérification (selfies/*, privés).
-        must: Rester privé ; seul listings/* est lisible, et uniquement via la distribution CloudFront.
+        why: Photos des annonces (listings/*, publiques) et selfies de vérification (selfies/*, privés, liens signés).
+        must: Seul listings/* est public, par la politique du bucket ; jamais d'ACL publique ni d'accès public à selfies/*.
     Properties:
+      # Politique publique autorisée (pour listings/* uniquement) ; les ACL publiques restent bloquées.
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
-        BlockPublicPolicy: true
+        BlockPublicPolicy: false
         IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+        RestrictPublicBuckets: false
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -84,15 +84,11 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: "false"
-          - Sid: CloudFrontReadListings
+          - Sid: PublicReadListingPhotos
             Effect: Allow
-            Principal:
-              Service: cloudfront.amazonaws.com
+            Principal: "*"
             Action: s3:GetObject
             Resource: !Sub "${MediaBucket.Arn}/listings/*"
-            Condition:
-              StringEquals:
-                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
 
   OpsBucket:
     Type: AWS::S3::Bucket
@@ -204,15 +200,27 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Metadata:
       com.aws.cloudformation.Context:
-        must: N'ouvrir le port 80 qu'à la prefix list CloudFront ; aucun accès SSH (administration via SSM).
+        why: Serveur HTTPS public (Vercel, navigateurs, webhooks Chariow, validation Let's Encrypt sur le port 80).
+        must: Uniquement 80 et 443 ; aucun accès SSH (administration via SSM). Revenir à CloudFront seul quand le compte le permet.
     Properties:
-      GroupDescription: Nyanga API - HTTP depuis CloudFront uniquement
+      GroupDescription: Nyanga API - HTTP et HTTPS publics (Caddy)
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          SourcePrefixListId: !Ref CloudFrontPrefixListId
-          Description: CloudFront origin-facing
+          CidrIp: 0.0.0.0/0
+          Description: HTTP - redirection HTTPS et validation Lets Encrypt
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS
+        - IpProtocol: udp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTP/3
 
   ServerLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -247,7 +255,7 @@ Resources:
       ImageId: !Ref AmiId
       InstanceType: !Ref InstanceType
       SubnetId: !Ref SubnetId
-      SecurityGroupIds: [!Ref ServerSecurityGroup]
+      SecurityGroupIds: [!GetAtt ServerSecurityGroup.GroupId]
       IamInstanceProfile: !Ref InstanceProfile
       LaunchTemplate:
         LaunchTemplateId: !Ref ServerLaunchTemplate
@@ -305,60 +313,6 @@ Resources:
       AllocationId: !GetAtt ServerIp.AllocationId
       InstanceId: !Ref Server
 
-  MediaOriginAccessControl:
-    Type: AWS::CloudFront::OriginAccessControl
-    Properties:
-      OriginAccessControlConfig:
-        Name: !Sub "${AWS::StackName}-media"
-        OriginAccessControlOriginType: s3
-        SigningBehavior: always
-        SigningProtocol: sigv4
-
-  Distribution:
-    Type: AWS::CloudFront::Distribution
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Point d'entrée HTTPS unique (API + photos) sans nom de domaine ni certificat à gérer.
-        must: L'en-tête X-Origin-Verify doit égaler le paramètre SSM /nyanga/prod/ORIGIN_SECRET lu par l'API.
-    Properties:
-      DistributionConfig:
-        Enabled: true
-        Comment: Nyanga API et photos
-        HttpVersion: http2and3
-        PriceClass: PriceClass_All
-        Origins:
-          - Id: api
-            DomainName: !Join ["", ["ec2-", !Join ["-", !Split [".", !Ref ServerIp]], !Sub ".${AWS::Region}.compute.amazonaws.com"]]
-            CustomOriginConfig:
-              OriginProtocolPolicy: http-only
-              HTTPPort: 80
-            OriginCustomHeaders:
-              - HeaderName: X-Origin-Verify
-                HeaderValue: "{{resolve:ssm:/nyanga/prod/ORIGIN_SECRET}}"
-          - Id: media
-            DomainName: !GetAtt MediaBucket.RegionalDomainName
-            OriginAccessControlId: !GetAtt MediaOriginAccessControl.Id
-            S3OriginConfig:
-              OriginAccessIdentity: ""
-        DefaultCacheBehavior:
-          TargetOriginId: api
-          ViewerProtocolPolicy: https-only
-          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-          CachedMethods: [GET, HEAD]
-          Compress: true
-          # Managed-CachingDisabled + Managed-AllViewerExceptHostHeader (cookies, requête et en-têtes transmis).
-          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
-        CacheBehaviors:
-          - PathPattern: listings/*
-            TargetOriginId: media
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods: [GET, HEAD]
-            CachedMethods: [GET, HEAD]
-            Compress: true
-            # Managed-CachingOptimized
-            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
-
   GitHubDeployRole:
     Type: AWS::IAM::Role
     Metadata:
@@ -407,11 +361,14 @@ Resources:
                 Resource: "*"
 
 Outputs:
+  ApiDomain:
+    Description: Nom d'hôte HTTPS de l'API (paramètre SSM API_DOMAIN lu par Caddy).
+    Value: !Join ["", [!Join ["-", !Split [".", !Ref ServerIp]], ".sslip.io"]]
   ApiUrl:
     Description: URL publique de l'API (API_URL côté Vercel, webhook Chariow sur /api/webhooks/chariow).
-    Value: !Sub "https://${Distribution.DomainName}"
+    Value: !Join ["", ["https://", !Join ["-", !Split [".", !Ref ServerIp]], ".sslip.io"]]
   MediaPublicUrl:
-    Value: !Sub "https://${Distribution.DomainName}"
+    Value: !Sub "https://${MediaBucket.RegionalDomainName}"
   MediaBucketName:
     Value: !Ref MediaBucket
   OpsBucketName:
