@@ -18,7 +18,7 @@ export function buildCatalog(env: Env): CatalogItem[] {
   return [
     { sku: 'PREMIUM', kind: 'plan', plan: 'PREMIUM', label: 'Premium', priceXaf: 2500, period: '30 jours', productId: env.CHARIOW_PRODUCT_PREMIUM },
     { sku: 'VIP', kind: 'plan', plan: 'VIP', label: 'VIP', priceXaf: 7500, period: '30 jours', productId: env.CHARIOW_PRODUCT_VIP },
-    { sku: 'BUMP', kind: 'boost', label: 'Remontée en tête de liste', priceXaf: 500, featuredHours: 0, productId: env.CHARIOW_PRODUCT_BUMP },
+    { sku: 'BUMP', kind: 'boost', label: 'Remontée en tête de liste', priceXaf: 700, featuredHours: 0, productId: env.CHARIOW_PRODUCT_BUMP },
     { sku: 'FEATURED_24H', kind: 'boost', label: 'À la une 24 h', priceXaf: 1500, featuredHours: 24, productId: env.CHARIOW_PRODUCT_FEATURED_24H },
     { sku: 'FEATURED_7D', kind: 'boost', label: 'À la une 7 jours', priceXaf: 5000, featuredHours: 168, productId: env.CHARIOW_PRODUCT_FEATURED_7D },
   ];

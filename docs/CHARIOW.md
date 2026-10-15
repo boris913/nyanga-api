@@ -6,7 +6,7 @@
 |---|---|---|---|
 | Nyanga Premium | Licence, expiration 30 jours | 2 500 FCFA | `CHARIOW_PRODUCT_PREMIUM` |
 | Nyanga VIP | Licence, expiration 30 jours | 7 500 FCFA | `CHARIOW_PRODUCT_VIP` |
-| Remontée en tête de liste | Achat unique | 500 FCFA | `CHARIOW_PRODUCT_BUMP` |
+| Remontée en tête de liste | Achat unique | 700 FCFA | `CHARIOW_PRODUCT_BUMP` |
 | À la une 24 h | Achat unique | 1 500 FCFA | `CHARIOW_PRODUCT_FEATURED_24H` |
 | À la une 7 jours | Achat unique | 5 000 FCFA | `CHARIOW_PRODUCT_FEATURED_7D` |
 
