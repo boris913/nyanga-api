@@ -24,9 +24,10 @@ Parameters:
     Description: Sous-réseau public par défaut ; le volume de données doit être dans la même zone.
   AvailabilityZone:
     Type: AWS::EC2::AvailabilityZone::Name
-  GitHubRepository:
+  GitHubSubject:
     Type: String
-    Default: boris913/nyanga-api
+    Default: repo:boris913@120689453/nyanga-api@1420761063
+    Description: Préfixe du sujet OIDC GitHub (format immuable propriétaire@id/dépôt@id, voir l'API actions/oidc/customization/sub).
   WebOrigin:
     Type: String
     Default: https://nyanga-web.vercel.app
@@ -318,7 +319,7 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: Déploiement sans clé longue durée depuis GitHub Actions (fournisseur OIDC déjà présent dans le compte).
-        must: Limité à la branche main du dépôt GitHubRepository.
+        must: Limité à la branche main du dépôt désigné par GitHubSubject.
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -330,7 +331,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepository}:ref:refs/heads/main"
+                token.actions.githubusercontent.com:sub: !Sub "${GitHubSubject}:ref:refs/heads/main"
       Policies:
         - PolicyName: nyanga-deploy
           PolicyDocument:
