@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import Fastify, { type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
@@ -76,6 +77,14 @@ export async function buildApp(env: Env, overrides: AppOverrides = {}) {
     if (user.role === 'USER') throw forbidden();
     return user;
   });
+
+  if (env.ORIGIN_SECRET) {
+    const expected = Buffer.from(env.ORIGIN_SECRET);
+    app.addHook('onRequest', async (req, reply) => {
+      const got = Buffer.from(String(req.headers['x-origin-verify'] ?? ''));
+      if (got.length !== expected.length || !crypto.timingSafeEqual(got, expected)) return reply.status(403).send({ error: 'forbidden' });
+    });
+  }
 
   await app.register(helmet);
   await app.register(cookie);

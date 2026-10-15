@@ -1,0 +1,7 @@
+[Unit]
+Description=Sauvegarde PostgreSQL Nyanga vers S3
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/nyanga/backup.sh

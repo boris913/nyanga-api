@@ -1,0 +1,424 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Nyanga MVP (eu-west-3). Un serveur EC2 t3.micro fait tourner l'API et PostgreSQL dans Docker ;
+  CloudFront fournit le HTTPS public, sert /api/* depuis l'EC2 et listings/* depuis le bucket photos (OAC).
+  L'EC2 n'accepte que CloudFront (prefix list + en-tête secret). Déploiement : GitHub Actions (OIDC) pousse
+  l'image dans ECR puis lance deploy.sh via SSM Run Command. Données : volume EBS dédié conservé + sauvegarde
+  quotidienne pg_dump dans le bucket ops.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: AMI Amazon Linux 2023 x86_64 figée (une AMI changeante remplacerait le serveur à chaque mise à jour).
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Sous-réseau public par défaut ; le volume de données doit être dans la même zone.
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+  CloudFrontPrefixListId:
+    Type: String
+    Description: Prefix list gérée com.amazonaws.global.cloudfront.origin-facing de la région.
+  GitHubRepository:
+    Type: String
+    Default: boris913/nyanga-api
+  WebOrigin:
+    Type: String
+    Default: https://nyanga-web.vercel.app
+    Description: Origine du site, autorisée en CORS pour l'envoi direct des photos vers S3.
+
+Resources:
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Photos des annonces (listings/*, servies par CloudFront) et selfies de vérification (selfies/*, privés).
+        must: Rester privé ; seul listings/* est lisible, et uniquement via la distribution CloudFront.
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: anciennes-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [POST]
+            AllowedOrigins: [!Ref WebOrigin]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt MediaBucket.Arn
+              - !Sub "${MediaBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: CloudFrontReadListings
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${MediaBucket.Arn}/listings/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  OpsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Fichiers de déploiement du serveur (deploy/*) et sauvegardes quotidiennes de la base (backups/*).
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: sauvegardes-30-jours
+            Status: Enabled
+            Prefix: backups/
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: deploy-anciennes-versions
+            Status: Enabled
+            Prefix: deploy/
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+
+  OpsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref OpsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt OpsBucket.Arn
+              - !Sub "${OpsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"Garder les 10 dernières images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: nyanga-server
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !GetAtt Repository.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "${MediaBucket.Arn}/*"
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${OpsBucket.Arn}/deploy/*"
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${OpsBucket.Arn}/backups/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt OpsBucket.Arn
+              - Effect: Allow
+                Action: ssm:GetParametersByPath
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/nyanga/prod"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        must: N'ouvrir le port 80 qu'à la prefix list CloudFront ; aucun accès SSH (administration via SSM).
+    Properties:
+      GroupDescription: Nyanga API - HTTP depuis CloudFront uniquement
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: CloudFront origin-facing
+
+  ServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          # 2 sauts : les conteneurs Docker doivent joindre IMDSv2 pour obtenir les droits S3 du rôle.
+          HttpPutResponseHopLimit: 2
+
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Données PostgreSQL, séparées du disque système pour survivre à un remplacement du serveur.
+        must: Ne jamais supprimer sans sauvegarde vérifiée ; même zone que le serveur.
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      Size: 10
+      VolumeType: gp3
+      Encrypted: true
+      Tags:
+        - Key: Name
+          Value: nyanga-postgres
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref ServerSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ServerLaunchTemplate
+        Version: !GetAtt ServerLaunchTemplate.LatestVersionNumber
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 16
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: nyanga-api
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          if [ ! -f /swapfile ]; then
+            dd if=/dev/zero of=/swapfile bs=1M count=1024
+            chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+          VOLUME_ID="${DataVolume}"
+          DEV="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol${!VOLUME_ID#vol-}"
+          for i in $(seq 1 120); do [ -e "$DEV" ] && break; sleep 5; done
+          blkid "$DEV" || mkfs.xfs "$DEV"
+          mkdir -p /data
+          grep -q ' /data ' /etc/fstab || echo "$DEV /data xfs defaults,nofail 0 2" >> /etc/fstab
+          mount -a
+          mkdir -p /data/postgres /opt/nyanga
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Server
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  ServerIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: nyanga-api
+
+  ServerIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ServerIp.AllocationId
+      InstanceId: !Ref Server
+
+  MediaOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-media"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Point d'entrée HTTPS unique (API + photos) sans nom de domaine ni certificat à gérer.
+        must: L'en-tête X-Origin-Verify doit égaler le paramètre SSM /nyanga/prod/ORIGIN_SECRET lu par l'API.
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Nyanga API et photos
+        HttpVersion: http2and3
+        PriceClass: PriceClass_All
+        Origins:
+          - Id: api
+            DomainName: !Join ["", ["ec2-", !Join ["-", !Split [".", !Ref ServerIp]], !Sub ".${AWS::Region}.compute.amazonaws.com"]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+            OriginCustomHeaders:
+              - HeaderName: X-Origin-Verify
+                HeaderValue: "{{resolve:ssm:/nyanga/prod/ORIGIN_SECRET}}"
+          - Id: media
+            DomainName: !GetAtt MediaBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt MediaOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: api
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingDisabled + Managed-AllViewerExceptHostHeader (cookies, requête et en-têtes transmis).
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+        CacheBehaviors:
+          - PathPattern: listings/*
+            TargetOriginId: media
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            # Managed-CachingOptimized
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Déploiement sans clé longue durée depuis GitHub Actions (fournisseur OIDC déjà présent dans le compte).
+        must: Limité à la branche main du dépôt GitHubRepository.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepository}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: nyanga-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt Repository.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${OpsBucket.Arn}/deploy/*"
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Server}"
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript"
+              - Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*"
+
+Outputs:
+  ApiUrl:
+    Description: URL publique de l'API (API_URL côté Vercel, webhook Chariow sur /api/webhooks/chariow).
+    Value: !Sub "https://${Distribution.DomainName}"
+  MediaPublicUrl:
+    Value: !Sub "https://${Distribution.DomainName}"
+  MediaBucketName:
+    Value: !Ref MediaBucket
+  OpsBucketName:
+    Value: !Ref OpsBucket
+  InstanceId:
+    Value: !Ref Server
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+  GitHubDeployRoleArn:
+    Value: !GetAtt GitHubDeployRole.Arn

@@ -71,12 +71,14 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       take: 50,
       include: { listing: { include: { photos: { orderBy: { position: 'asc' }, take: 3 } } } },
     });
-    return users.map((u) => ({
-      id: u.id,
-      displayName: u.displayName,
-      selfie: u.selfieKey ? app.storage.publicUrl(u.selfieKey) : null,
-      photos: u.listing?.photos.map((p) => app.storage.publicUrl(p.key)) ?? [],
-    }));
+    return Promise.all(
+      users.map(async (u) => ({
+        id: u.id,
+        displayName: u.displayName,
+        selfie: u.selfieKey ? await app.storage.signedUrl(u.selfieKey) : null,
+        photos: u.listing?.photos.map((p) => app.storage.publicUrl(p.key)) ?? [],
+      })),
+    );
   });
 
   app.post<{ Params: { id: string } }>('/users/:id/verification', async (req) => {

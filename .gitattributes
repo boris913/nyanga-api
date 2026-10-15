@@ -1,0 +1,2 @@
+*.sh text eol=lf
+infra/aws/server/* text eol=lf

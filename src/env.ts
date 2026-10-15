@@ -22,6 +22,8 @@ const schema = z.object({
   CHARIOW_PRODUCT_BUMP: z.string().default(''),
   CHARIOW_PRODUCT_FEATURED_24H: z.string().default(''),
   CHARIOW_PRODUCT_FEATURED_7D: z.string().default(''),
+  // En production, CloudFront ajoute cet en-tête : toute requête sans lui est refusée.
+  ORIGIN_SECRET: z.string().default(''),
   ADMIN_EMAILS: z
     .string()
     .default('')
