@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FastifyRequest } from 'fastify';
 import { clientIp } from '../src/lib/client-ip.js';
-import { normalizeCameroonPhone } from '../src/lib/phone.js';
+import { maskWhatsapp, normalizeCameroonPhone, normalizeWhatsapp, whatsappLink } from '../src/lib/phone.js';
 import { hashPassword, verifyPassword } from '../src/lib/password.js';
 import { ageFromBirthDate, moderateText } from '../src/lib/moderation.js';
 import { signSession, verifySession } from '../src/lib/session.js';
@@ -36,18 +36,23 @@ describe('moderateText', () => {
     expect(moderateText('Homme de 34 ans cherche relation sérieuse', 'J’aime la cuisine et les balades à Kribi.').decision).toBe('ok');
   });
   it.each([
-    ['services tarifés', 'Escort disponible ce soir'],
-    ['prix', 'Rencontre 20000 FCFA la nuit'],
-    ['montant abrégé', 'Disponible pour 10k'],
     ['mineurs', 'Lycéenne cherche ami'],
     ['âge mineur', 'J’ai 16 ans'],
   ])('refuse : %s', (_label, text) => expect(moderateText(text).decision).toBe('reject'));
 
   it('ne confond pas 31 ans avec un âge mineur', () => expect(moderateText('Femme de 31 ans').decision).toBe('ok'));
-  it('signale un numéro ou un contact externe', () => {
-    expect(moderateText('Écris-moi au 6 90 12 34 56').decision).toBe('review');
-    expect(moderateText('Contacte-moi sur WhatsApp').decision).toBe('review');
+  it('laisse passer le reste, filtré seulement par la relecture', () => {
+    expect(moderateText('Écris-moi au 6 90 12 34 56').decision).toBe('ok');
+    expect(moderateText('Femme discrète, massage et cadeau').decision).toBe('ok');
   });
+});
+
+describe('whatsapp', () => {
+  it('accepte un mobile camerounais', () => expect(normalizeWhatsapp('6 90 12 34 56')).toBe('+237690123456'));
+  it('refuse un fixe', () => expect(normalizeWhatsapp('222 12 34 56')).toBeNull());
+  it('masque tout sauf le premier chiffre', () => expect(maskWhatsapp('+237690123456')).toBe('+237 6XX XX XX XX'));
+  it('prépare le lien wa.me', () =>
+    expect(whatsappLink('+237690123456', 'Salut à toi')).toBe('https://wa.me/237690123456?text=Salut%20%C3%A0%20toi'));
 });
 
 describe('ageFromBirthDate', () => {

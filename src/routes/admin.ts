@@ -10,7 +10,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     await app.requireStaff(req);
     const { status } = z.object({ status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'HIDDEN']).default('PENDING') }).parse(req.query);
     const listings = await prisma.listing.findMany({
-      where: { status },
+      // Une annonce sans photo n'est pas encore soumise.
+      where: { status, ...(status === 'PENDING' ? { photos: { some: {} } } : {}) },
       orderBy: { updatedAt: 'asc' },
       take: 50,
       include: {
@@ -27,6 +28,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       intent: l.intent,
       city: l.city.name,
       neighborhood: l.neighborhood,
+      whatsapp: l.whatsapp,
       status: l.status,
       moderationNote: l.moderationNote,
       updatedAt: l.updatedAt,

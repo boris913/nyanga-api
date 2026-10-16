@@ -113,6 +113,8 @@ model Listing {
   cityId        String
   city          City          @relation(fields: [cityId], references: [id])
   neighborhood  String?
+  // Numéro WhatsApp de l'annonceur (+237…), jamais renvoyé en clair aux visiteurs.
+  whatsapp      String?
   status        ListingStatus @default(PENDING)
   moderationNote String?
   bumpedAt      DateTime      @default(now())
@@ -135,6 +137,8 @@ model Photo {
   listingId String
   listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
   key       String   @unique
+  // Vignette légère (480 px) préparée par le navigateur pour les listes.
+  thumbKey  String?
   position  Int      @default(0)
   createdAt DateTime @default(now())
 }

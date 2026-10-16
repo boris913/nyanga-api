@@ -1,0 +1,3 @@
+# Publication sans relecture pour Premium et VIP, un seul filtre automatique
+
+Les annonces des membres Premium et VIP sont publiées immédiatement, sans relecture par l'équipe ; seules les annonces des membres Standard sont relues. La publication immédiate fait partie de ce que l'on vend avec ces formules. Les filtres automatiques sur le vocabulaire, les numéros et les tarifs ont été retirés à la demande du propriétaire du site. Un seul est conservé, pour tous les comptes : le rejet des textes qui évoquent des mineurs, parce que, pour un compte payant, c'est la seule barrière avant la mise en ligne. Ne pas retirer ce filtre. Les signalements restent le recours a posteriori pour toutes les annonces.

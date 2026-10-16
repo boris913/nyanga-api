@@ -5,6 +5,7 @@ import { badRequest, conflict, notFound } from '../lib/errors.js';
 import { ageFromBirthDate, moderateText } from '../lib/moderation.js';
 import { ALLOWED_IMAGE_TYPES } from '../lib/storage.js';
 import { PLAN_LIMITS } from '../lib/plans.js';
+import { maskWhatsapp, normalizeWhatsapp, whatsappLink } from '../lib/phone.js';
 import { effectivePlan } from '../chariow/apply-pulse.js';
 
 const PAGE_SIZE = 24;
@@ -16,6 +17,7 @@ const listingSchema = z.object({
   intent: z.enum(intents),
   citySlug: z.string().min(2),
   neighborhood: z.string().trim().max(60).optional(),
+  whatsapp: z.string().trim().min(9).max(20),
 });
 
 const searchSchema = z.object({
@@ -56,7 +58,12 @@ function present(app: FastifyInstance, l: ListingWithRelations, plan: Plan = 'ST
     featured: Boolean(l.featuredUntil && l.featuredUntil > new Date()),
     pinned: Boolean(l.pinnedUntil && l.pinnedUntil > new Date()),
     bumpedAt: l.bumpedAt,
-    photos: l.photos.map((p) => ({ id: p.id, url: app.storage.publicUrl(p.key) })),
+    photos: l.photos.map((p) => ({
+      id: p.id,
+      url: app.storage.publicUrl(p.key),
+      thumbUrl: app.storage.publicUrl(p.thumbKey ?? p.key),
+    })),
+    whatsappMasked: l.whatsapp ? maskWhatsapp(l.whatsapp) : null,
     author: {
       id: l.user.id,
       displayName: l.user.displayName,
@@ -71,6 +78,11 @@ function present(app: FastifyInstance, l: ListingWithRelations, plan: Plan = 'ST
 export const listingRoutes: FastifyPluginAsync = async (app) => {
   const { prisma } = app;
 
+  async function statusAfterEdit(userId: string): Promise<'APPROVED' | 'PENDING'> {
+    const { plan } = await effectivePlan(prisma, userId);
+    return plan === 'STANDARD' ? 'PENDING' : 'APPROVED';
+  }
+
   app.get('/', async (req) => {
     const q = searchSchema.parse(req.query);
     const now = new Date();
@@ -83,6 +95,7 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     }
     const where: Prisma.ListingWhereInput = {
       status: 'APPROVED',
+      photos: { some: {} },
       user: userWhere,
       ...(q.city ? { city: { slug: q.city } } : {}),
       ...(q.intent ? { intent: q.intent } : {}),
@@ -115,13 +128,13 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     const user = await app.requireUser(req);
     const listing = await prisma.listing.findUnique({ where: { userId: user.id }, include: listingInclude });
     if (!listing) throw notFound('Vous n’avez pas encore d’annonce');
-    return { ...present(app, listing), moderationNote: listing.moderationNote };
+    return { ...present(app, listing), whatsapp: listing.whatsapp, moderationNote: listing.moderationNote };
   });
 
   app.get<{ Params: { id: string } }>('/:id', async (req) => {
     const listing = await prisma.listing.findUnique({ where: { id: req.params.id }, include: listingInclude });
     if (!listing) throw notFound();
-    if (listing.status !== 'APPROVED') {
+    if (listing.status !== 'APPROVED' || !listing.photos.length) {
       const viewer = await app.currentUser(req);
       if (!viewer || (viewer.id !== listing.userId && viewer.role === 'USER')) throw notFound();
     }
@@ -129,13 +142,16 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     return present(app, listing, plans.get(listing.userId));
   });
 
-  // Création ou modification : toute écriture repasse en modération.
+  // Création ou modification. Premium et VIP : publication automatique ; Standard : relecture par l'équipe (docs/adr/0002).
+  // Une annonce sans photo n'est visible ni des visiteurs ni de la file de relecture.
   app.put('/mine', async (req) => {
     const user = await app.requireUser(req);
     if (!user.displayName || !user.birthDate) throw badRequest('Complétez votre profil avant de publier');
     const body = listingSchema.parse(req.body);
     const check = moderateText(body.title, body.body, body.neighborhood);
     if (check.decision === 'reject') throw badRequest('Annonce refusée par nos règles', check.reasons);
+    const whatsapp = normalizeWhatsapp(body.whatsapp);
+    if (!whatsapp) throw badRequest('Numéro WhatsApp invalide', { whatsapp: ['Numéro mobile camerounais attendu (6XX XX XX XX)'] });
     const city = await prisma.city.findUnique({ where: { slug: body.citySlug } });
     if (!city) throw badRequest('Ville inconnue');
     const data = {
@@ -144,11 +160,12 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
       intent: body.intent,
       cityId: city.id,
       neighborhood: body.neighborhood || null,
-      status: 'PENDING' as const,
-      moderationNote: check.reasons.length ? `Filtre auto : ${check.reasons.join(' ; ')}` : null,
+      whatsapp,
+      status: await statusAfterEdit(user.id),
+      moderationNote: null,
     };
     const listing = await prisma.listing.upsert({ where: { userId: user.id }, update: data, create: { ...data, userId: user.id } });
-    return { id: listing.id, status: listing.status, warnings: check.reasons };
+    return { id: listing.id, status: listing.status };
   });
 
   app.post('/mine/photos/upload', async (req) => {
@@ -163,25 +180,43 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
 
   app.post('/mine/photos', async (req) => {
     const user = await app.requireUser(req);
-    const { key } = z.object({ key: z.string() }).parse(req.body);
-    if (!key.startsWith(`listings/${user.id}/`)) throw badRequest('Fichier invalide');
+    const { key, thumbKey } = z.object({ key: z.string(), thumbKey: z.string().optional() }).parse(req.body);
+    const own = (k: string) => k.startsWith(`listings/${user.id}/`) && !k.includes('..');
+    if (!own(key) || (thumbKey && !own(thumbKey))) throw badRequest('Fichier invalide');
     const listing = await prisma.listing.findUnique({ where: { userId: user.id }, include: { _count: { select: { photos: true } } } });
     if (!listing) throw badRequest('Créez d’abord votre annonce');
     const { plan } = await effectivePlan(prisma, user.id);
     if (listing._count.photos >= PLAN_LIMITS[plan].photos) throw conflict('Limite de photos atteinte');
-    // Une nouvelle photo renvoie l'annonce en modération.
+    // Une nouvelle photo renvoie l'annonce en relecture, sauf pour Premium et VIP.
+    const status = await statusAfterEdit(user.id);
     await prisma.$transaction(async (tx) => {
-      await tx.photo.create({ data: { listingId: listing.id, key, position: listing._count.photos } });
-      await tx.listing.update({ where: { id: listing.id }, data: { status: 'PENDING' } });
+      await tx.photo.create({ data: { listingId: listing.id, key, thumbKey: thumbKey ?? null, position: listing._count.photos } });
+      await tx.listing.update({ where: { id: listing.id }, data: { status } });
     });
     return { ok: true };
   });
 
   app.delete<{ Params: { photoId: string } }>('/mine/photos/:photoId', async (req) => {
     const user = await app.requireUser(req);
-    const deleted = await prisma.photo.deleteMany({ where: { id: req.params.photoId, listing: { userId: user.id } } });
-    if (!deleted.count) throw notFound();
+    const photo = await prisma.photo.findFirst({ where: { id: req.params.photoId, listing: { userId: user.id } } });
+    if (!photo) throw notFound();
+    if ((await prisma.photo.count({ where: { listingId: photo.listingId } })) <= 1) {
+      throw conflict('Une annonce garde au moins une photo : ajoutez-en une autre avant de supprimer celle-ci');
+    }
+    await prisma.photo.delete({ where: { id: photo.id } });
     return { ok: true };
+  });
+
+  // Lien WhatsApp vers l'annonceur, ouvert à tous les visiteurs. Le numéro n'est jamais dans la page :
+  // il n'est donné qu'au clic, et une même connexion est limitée pour empêcher l'aspiration des numéros.
+  app.post<{ Params: { id: string } }>('/:id/whatsapp', { config: { rateLimit: { max: 20, timeWindow: '1 hour' } } }, async (req) => {
+    const listing = await prisma.listing.findUnique({
+      where: { id: req.params.id },
+      include: { user: { select: { displayName: true, bannedAt: true } }, _count: { select: { photos: true } } },
+    });
+    if (!listing || listing.status !== 'APPROVED' || !listing._count.photos || listing.user.bannedAt || !listing.whatsapp) throw notFound();
+    const text = `J'ai vu ton profil sur Nyanga -> ${listing.user.displayName ?? listing.title} et je veux te rencontrer.`;
+    return { url: whatsappLink(listing.whatsapp, text) };
   });
 
   app.post<{ Params: { id: string } }>('/:id/report', { config: { rateLimit: { max: 10, timeWindow: '1 hour' } } }, async (req) => {
