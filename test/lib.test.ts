@@ -3,7 +3,8 @@ import type { FastifyRequest } from 'fastify';
 import { clientIp } from '../src/lib/client-ip.js';
 import { maskWhatsapp, normalizeCameroonPhone, normalizeWhatsapp, whatsappLink } from '../src/lib/phone.js';
 import { hashPassword, verifyPassword } from '../src/lib/password.js';
-import { ageFromBirthDate, moderateText } from '../src/lib/moderation.js';
+import { ageFromBirthDate, moderateText, RISK_REVIEW_THRESHOLD, riskScore } from '../src/lib/moderation.js';
+import { listingSlug, randomSuffix, slugify } from '../src/lib/slug.js';
 import { signSession, verifySession } from '../src/lib/session.js';
 
 describe('normalizeCameroonPhone', () => {
@@ -85,4 +86,71 @@ describe('clientIp', () => {
     expect(clientIp(req({ 'x-nyanga-client-ip': '1.2.3.4' }), 'secret')).toBe('98.84.176.5');
     expect(clientIp(req({ 'x-nyanga-client-ip': '1.2.3.4', 'x-nyanga-proxy-secret': '' }), '')).toBe('98.84.176.5');
   });
+});
+
+describe('riskScore', () => {
+  const base = { title: 'Femme de 30 ans cherche relation', body: 'J’aime la cuisine et les balades à Kribi le dimanche.' };
+  it('donne 0 à une annonce ordinaire', () => expect(riskScore({ ...base, age: 30 })).toEqual({ score: 0, reasons: [] }));
+  it.each([
+    ['Adolescente sérieuse', 40],
+    ['petite ado', 40],
+    ['Lycéenne', 45],
+    ['écolière', 45],
+    ['school girl', 45],
+    ['uniforme scolaire', 45],
+    ['lolita', 50],
+    ['vierge', 25],
+    ['tout juste 18 ans', 35],
+    ['fraîchement 18', 35],
+    ['teenager', 20],
+    ['dispo après les cours', 20],
+    ['pendant les vacances scolaires', 20],
+    ['débutante', 10],
+    ['première fois', 10],
+  ])('« %s » → %i', (phrase, expected) => {
+    const r = riskScore({ ...base, body: `${base.body} ${phrase}` });
+    expect(r.score).toBe(expected);
+    expect(r.reasons).toHaveLength(1);
+  });
+  it('ne confond pas « adore » avec « ado »', () => expect(riskScore({ ...base, body: 'J’adore danser, je suis adorable.' }).score).toBe(0));
+  it('lit aussi le quartier', () => expect(riskScore({ ...base, neighborhood: 'Près du lycée, après les cours' }).score).toBe(20));
+  it.each([
+    [18, 20],
+    [19, 10],
+    [20, 0],
+    [null, 0],
+  ])('âge %s → %i', (age, expected) => expect(riskScore({ ...base, age }).score).toBe(expected));
+  it.each([
+    [1, 0],
+    [2, 15],
+    [8, 15],
+    [9, 25],
+  ])('WhatsApp partagé avec %i autres annonces → %i', (n, expected) =>
+    expect(riskScore({ ...base, sharedWhatsappCount: n }).score).toBe(expected),
+  );
+  it('cumule les signaux et plafonne à 100', () => {
+    const r = riskScore({ title: 'Lolita lycéenne', body: 'ado vierge, tout juste 18', age: 18, sharedWhatsappCount: 10 });
+    expect(r.score).toBe(100);
+    expect(r.reasons.length).toBeGreaterThan(4);
+  });
+  it('seuil de relecture à 30', () => {
+    expect(RISK_REVIEW_THRESHOLD).toBe(30);
+    expect(riskScore({ ...base, body: 'vierge', age: 19 }).score).toBeGreaterThanOrEqual(RISK_REVIEW_THRESHOLD);
+  });
+});
+
+describe('slug d’annonce', () => {
+  it('retire accents et ponctuation', () => expect(slugify('  Ngaoundéré : Cœur Élégant !! ')).toBe('ngaoundere-coeur-elegant'));
+  it('assemble nom, ville et suffixe', () => expect(listingSlug('Amélie N.', 'douala', 'ab12cd')).toBe('amelie-n-douala-ab12cd'));
+  it('suffixe aléatoire de 6 caractères minuscules', () => {
+    expect(listingSlug('Paul', 'yaounde')).toMatch(/^paul-yaounde-[a-z0-9]{6}$/);
+    expect(randomSuffix()).not.toBe(randomSuffix());
+  });
+  it('reste sous ~60 caractères sans tiret final', () => {
+    const s = listingSlug('Un nom de profil vraiment très très long pour une annonce de rencontre', 'ngaoundere', 'zzzzzz');
+    expect(s.length).toBeLessThanOrEqual(60);
+    expect(s).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+    expect(s.endsWith('-ngaoundere-zzzzzz')).toBe(true);
+  });
+  it('se replie sur « annonce » si le nom est vide après nettoyage', () => expect(listingSlug('😀', 'kribi', 'abcdef')).toBe('annonce-kribi-abcdef'));
 });

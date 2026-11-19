@@ -5,14 +5,14 @@ import { forbidden, notFound } from '../lib/errors.js';
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const { prisma } = app;
 
-  // File de modération : les annonces les plus anciennes d'abord.
+  // File de modération : en attente, les annonces à risque d'abord (docs/adr/0003), puis les plus anciennes.
   app.get('/listings', async (req) => {
     await app.requireStaff(req);
     const { status } = z.object({ status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'HIDDEN']).default('PENDING') }).parse(req.query);
     const listings = await prisma.listing.findMany({
       // Une annonce sans photo n'est pas encore soumise.
       where: { status, ...(status === 'PENDING' ? { photos: { some: {} } } : {}) },
-      orderBy: { updatedAt: 'asc' },
+      orderBy: status === 'PENDING' ? [{ riskScore: 'desc' }, { updatedAt: 'asc' }] : [{ updatedAt: 'asc' }],
       take: 50,
       include: {
         city: true,
@@ -31,6 +31,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       whatsapp: l.whatsapp,
       status: l.status,
       moderationNote: l.moderationNote,
+      riskScore: l.riskScore,
+      riskReasons: Array.isArray(l.riskReasons) ? l.riskReasons.filter((r): r is string => typeof r === 'string') : [],
       updatedAt: l.updatedAt,
       openReports: l._count.reports,
       photos: l.photos.map((p) => app.storage.publicUrl(p.key)),

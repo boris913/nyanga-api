@@ -27,12 +27,24 @@ La présentation publique d'un annonceur : texte, ville, photos et bouton WhatsA
 _Avoid_: Profil, fiche, post
 
 **Publication automatique**:
-Mise en ligne immédiate d'une annonce d'un membre Premium ou VIP, sans relecture par l'équipe.
+Mise en ligne immédiate d'une annonce d'un membre Premium ou VIP, sans relecture par l'équipe, sauf s'il s'agit d'une annonce à risque.
 _Avoid_: Auto-validation
 
 **Relecture**:
-Contrôle d'une annonce par l'équipe avant sa mise en ligne, réservé aux annonces des membres Standard.
+Contrôle d'une annonce par l'équipe avant sa mise en ligne, pour les annonces des membres Standard et pour toute annonce à risque.
 _Avoid_: Validation, vérification (réservé au badge Vérifié)
+
+**Annonce à risque**:
+Annonce dont le score de risque atteint le seuil de relecture : elle passe en relecture même si l'annonceur est Premium ou VIP.
+_Avoid_: Annonce suspecte, annonce signalée (réservé aux signalements des membres)
+
+**Score de risque**:
+Note de 0 à 100, avec ses raisons, qui mesure les indices qu'une annonce pourrait concerner une personne mineure. C'est un tri pour l'équipe, pas un refus.
+_Avoid_: Note de modération
+
+**Adresse de l'annonce**:
+L'adresse lisible d'une annonce (nom, ville et quelques caractères), fixée à sa création et jamais modifiée.
+_Avoid_: Permalien, URL
 
 **Filigrane**:
 Le nom Nyanga incrusté de façon visible sur chaque photo d'annonce.

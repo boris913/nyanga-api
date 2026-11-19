@@ -10,7 +10,7 @@ const app = await buildApp(env, { prisma });
 const city = await prisma.city.findUniqueOrThrow({ where: { slug: 'douala' } });
 const mk = async (n: string, bumpedAt: Date) => {
   const u = await prisma.user.create({ data: { email: `${n}@t.invalid`, displayName: n, birthDate: new Date('1990-01-01') } });
-  return prisma.listing.create({ data: { userId: u.id, title: `Annonce ${n}`, body: 'x'.repeat(40), intent: 'RELATION', cityId: city.id, status: 'APPROVED', bumpedAt } });
+  return prisma.listing.create({ data: { userId: u.id, slug: `${n}-douala-test00`, title: `Annonce ${n}`, body: 'x'.repeat(40), intent: 'RELATION', cityId: city.id, status: 'APPROVED', bumpedAt } });
 };
 const h = (n: number) => new Date(Date.now() - n * 3600_000);
 const old = await mk('ancienne', h(48));

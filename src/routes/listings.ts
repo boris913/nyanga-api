@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
-import type { Plan, Prisma } from '@prisma/client';
+import { Prisma, type Plan } from '@prisma/client';
 import { z } from 'zod';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
-import { ageFromBirthDate, moderateText } from '../lib/moderation.js';
+import { ageFromBirthDate, moderateText, RISK_REVIEW_THRESHOLD, riskScore } from '../lib/moderation.js';
+import { listingSlug } from '../lib/slug.js';
 import { ALLOWED_IMAGE_TYPES } from '../lib/storage.js';
 import { PLAN_LIMITS } from '../lib/plans.js';
 import { maskWhatsapp, normalizeWhatsapp, whatsappLink } from '../lib/phone.js';
@@ -26,6 +27,9 @@ const searchSchema = z.object({
   gender: z.enum(['FEMME', 'HOMME']).optional(),
   minAge: z.coerce.number().int().min(18).max(99).optional(),
   maxAge: z.coerce.number().int().min(18).max(99).optional(),
+  neighborhood: z.string().trim().max(60).optional(),
+  // '1' : seulement les annonceurs au badge Vérifié.
+  verified: z.string().optional(),
   page: z.coerce.number().int().min(1).max(100).default(1),
 });
 
@@ -49,6 +53,7 @@ async function plansFor(app: FastifyInstance, userIds: string[]): Promise<Map<st
 function present(app: FastifyInstance, l: ListingWithRelations, plan: Plan = 'STANDARD') {
   return {
     id: l.id,
+    slug: l.slug,
     title: l.title,
     body: l.body,
     intent: l.intent,
@@ -88,6 +93,7 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     const now = new Date();
     const userWhere: Prisma.UserWhereInput = { bannedAt: null };
     if (q.gender) userWhere.gender = q.gender;
+    if (q.verified === '1') userWhere.verification = 'VERIFIED';
     if (q.minAge || q.maxAge) {
       userWhere.birthDate = {};
       if (q.minAge) userWhere.birthDate.lte = new Date(Date.UTC(now.getUTCFullYear() - q.minAge, now.getUTCMonth(), now.getUTCDate()));
@@ -99,6 +105,7 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
       user: userWhere,
       ...(q.city ? { city: { slug: q.city } } : {}),
       ...(q.intent ? { intent: q.intent } : {}),
+      ...(q.neighborhood ? { neighborhood: { contains: q.neighborhood, mode: 'insensitive' as const } } : {}),
     };
     // Remontées payantes en cours : en tête de la première page, hors pagination des autres annonces.
     const pinnedWhere: Prisma.ListingWhereInput = { AND: [where, { pinnedUntil: { gt: now } }] };
@@ -131,8 +138,11 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     return { ...present(app, listing), whatsapp: listing.whatsapp, moderationNote: listing.moderationNote };
   });
 
+  // Accepte l'identifiant ou l'adresse lisible (slug) de l'annonce.
   app.get<{ Params: { id: string } }>('/:id', async (req) => {
-    const listing = await prisma.listing.findUnique({ where: { id: req.params.id }, include: listingInclude });
+    const listing =
+      (await prisma.listing.findUnique({ where: { id: req.params.id }, include: listingInclude })) ??
+      (await prisma.listing.findUnique({ where: { slug: req.params.id }, include: listingInclude }));
     if (!listing) throw notFound();
     if (listing.status !== 'APPROVED' || !listing.photos.length) {
       const viewer = await app.currentUser(req);
@@ -143,6 +153,7 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
   });
 
   // Création ou modification. Premium et VIP : publication automatique ; Standard : relecture par l'équipe (docs/adr/0002).
+  // Une annonce à risque (score ≥ RISK_REVIEW_THRESHOLD) passe en relecture quelle que soit la formule (docs/adr/0003).
   // Une annonce sans photo n'est visible ni des visiteurs ni de la file de relecture.
   app.put('/mine', async (req) => {
     const user = await app.requireUser(req);
@@ -154,6 +165,14 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     if (!whatsapp) throw badRequest('Numéro WhatsApp invalide', { whatsapp: ['Numéro mobile camerounais attendu (6XX XX XX XX)'] });
     const city = await prisma.city.findUnique({ where: { slug: body.citySlug } });
     if (!city) throw badRequest('Ville inconnue');
+    const sharedWhatsappCount = await prisma.listing.count({ where: { whatsapp, userId: { not: user.id } } });
+    const risk = riskScore({
+      title: body.title,
+      body: body.body,
+      neighborhood: body.neighborhood,
+      age: ageFromBirthDate(user.birthDate),
+      sharedWhatsappCount,
+    });
     const data = {
       title: body.title,
       body: body.body,
@@ -161,11 +180,26 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
       cityId: city.id,
       neighborhood: body.neighborhood || null,
       whatsapp,
-      status: await statusAfterEdit(user.id),
+      status: risk.score >= RISK_REVIEW_THRESHOLD ? ('PENDING' as const) : await statusAfterEdit(user.id),
       moderationNote: null,
+      riskScore: risk.score,
+      riskReasons: risk.reasons,
     };
-    const listing = await prisma.listing.upsert({ where: { userId: user.id }, update: data, create: { ...data, userId: user.id } });
-    return { id: listing.id, status: listing.status };
+    // Le slug n'est fixé qu'à la création ; on retente en cas de collision (très improbable).
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const listing = await prisma.listing.upsert({
+          where: { userId: user.id },
+          update: data,
+          create: { ...data, userId: user.id, slug: listingSlug(user.displayName || body.title, city.slug) },
+        });
+        return { id: listing.id, slug: listing.slug, status: listing.status };
+      } catch (err) {
+        const slugTaken =
+          err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && JSON.stringify(err.meta?.target ?? '').includes('slug');
+        if (!slugTaken || attempt >= 2) throw err;
+      }
+    }
   });
 
   app.post('/mine/photos/upload', async (req) => {
@@ -187,8 +221,8 @@ export const listingRoutes: FastifyPluginAsync = async (app) => {
     if (!listing) throw badRequest('Créez d’abord votre annonce');
     const { plan } = await effectivePlan(prisma, user.id);
     if (listing._count.photos >= PLAN_LIMITS[plan].photos) throw conflict('Limite de photos atteinte');
-    // Une nouvelle photo renvoie l'annonce en relecture, sauf pour Premium et VIP.
-    const status = await statusAfterEdit(user.id);
+    // Une nouvelle photo renvoie l'annonce en relecture, sauf pour Premium et VIP (hors annonce à risque, docs/adr/0003).
+    const status = listing.riskScore >= RISK_REVIEW_THRESHOLD ? 'PENDING' : await statusAfterEdit(user.id);
     await prisma.$transaction(async (tx) => {
       await tx.photo.create({ data: { listingId: listing.id, key, thumbKey: thumbKey ?? null, position: listing._count.photos } });
       await tx.listing.update({ where: { id: listing.id }, data: { status } });
