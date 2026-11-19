@@ -107,6 +107,8 @@ model Listing {
   id            String        @id @default(cuid())
   userId        String        @unique
   user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Adresse lisible (« nom-ville-xxxxxx »), fixée à la création et jamais modifiée.
+  slug          String        @unique
   title         String
   body          String
   intent        Intent
@@ -117,7 +119,11 @@ model Listing {
   whatsapp      String?
   status        ListingStatus @default(PENDING)
   moderationNote String?
-  bumpedAt      DateTime      @default(now())
+  // Tri des annonces à risque (docs/adr/0003) : 0..100, relecture forcée au-delà du seuil.
+  riskScore     Int           @default(0)
+  // Raisons du score, en français (tableau de chaînes).
+  riskReasons   Json?
+  bumpedAt     DateTime      @default(now())
   featuredUntil DateTime?
   // Remontée payante : garantie en tête des annonces récentes jusqu'à cette date.
   pinnedUntil   DateTime?
